@@ -22,7 +22,48 @@ const fmt=n=>n<1048576?(n/1024).toFixed(1)+' KB':(n/1048576).toFixed(2)+' MB';fu
 function chooseFile(f){if(!f)return;if(!f.type.startsWith('video/')&&!/\.(mp4|mov|mkv|avi|webm|m4v)$/i.test(f.name)){status('Please select a video file.');return}selected=f;clearResult();$('filename').textContent=f.name;$('filesize').textContent=fmt(f.size);$('filebox').classList.add('show');$('start').disabled=false;status('Ready. Your original file will not be changed.')}
 $('choose').onclick=()=>$('picker').click();$('drop').onclick=e=>{if(e.target.id!=='choose')$('picker').click()};$('picker').onchange=e=>chooseFile(e.target.files[0]);$('remove').onclick=()=>{selected=null;$('picker').value='';$('filebox').classList.remove('show');$('start').disabled=true;clearResult();status('Select a video to get started.')};
 ['dragenter','dragover'].forEach(x=>$('drop').addEventListener(x,e=>{e.preventDefault();$('drop').classList.add('drag')}));['dragleave','drop'].forEach(x=>$('drop').addEventListener(x,e=>{e.preventDefault();$('drop').classList.remove('drag')}));$('drop').addEventListener('drop',e=>chooseFile(e.dataTransfer.files[0]));
-async function loadEngine(){if(ffmpeg)return ffmpeg;status('Loading FFmpeg. First use needs an internet connection…');const {FFmpeg}=await import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js');const {toBlobURL}=await import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js');const base='https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';ffmpeg=new FFmpeg();ffmpeg.on('progress',({progress})=>{$('bar').style.width=Math.max(4,Math.min(96,Math.round(progress*90+5)))+'%'});await ffmpeg.load({coreURL:await toBlobURL(base+'/ffmpeg-core.js','text/javascript'),wasmURL:await toBlobURL(base+'/ffmpeg-core.wasm','application/wasm')});return ffmpeg}
+let ffmpegLoading = null;
+
+async function loadEngine() {
+    if (ffmpeg) return ffmpeg;
+
+    if (ffmpegLoading) return ffmpegLoading;
+
+    ffmpegLoading = (async () => {
+        status('Loading FFmpeg... Please wait.');
+
+        const { FFmpeg } = await import(
+            'https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/dist/esm/index.js'
+        );
+
+        const { toBlobURL } = await import(
+            'https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/dist/esm/index.js'
+        );
+
+        const base = 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd';
+
+        const engine = new FFmpeg();
+
+        engine.on('progress', ({ progress }) => {
+            $('bar').style.width =
+                Math.max(4, Math.min(96, Math.round(progress * 90 + 5))) + '%';
+        });
+
+        await engine.load({
+            coreURL: await toBlobURL(base + '/ffmpeg-core.js', 'text/javascript'),
+            wasmURL: await toBlobURL(base + '/ffmpeg-core.wasm', 'application/wasm')
+        });
+
+        ffmpeg = engine;
+        return engine;
+    })();
+
+    try {
+        return await ffmpegLoading;
+    } finally {
+        ffmpegLoading = null;
+    }
+}
 const clean=n=>n.replace(/\.[^.]+$/,'').replace(/[^a-z0-9_-]/gi,'_').slice(0,45)||'video';
 async function encode(ff,input,out,crf){try{await ff.deleteFile(out)}catch{}const code=await ff.exec(['-i',input,'-map','0:v:0','-map','0:a?','-c:v','libx264','-preset','slow','-crf',String(crf),'-pix_fmt','yuv420p','-c:a','aac','-b:a','192k','-movflags','+faststart','-max_muxing_queue_size','1024',out]);if(code!==0)throw Error('Could not encode this video. Try an MP4 or MOV file.');return new Uint8Array(await ff.readFile(out))}
 $('start').onclick=async()=>{if(!selected||busy)return;const target=Number($('target').value),hasTarget=$('target').value.trim()!=='';if(hasTarget&&(!Number.isFinite(target)||target<=0)){status('Enter a valid target size in MB.');return}if(hasTarget&&target*1048576>=selected.size){status('Target size must be smaller than the original file.');return}busy=true;$('start').disabled=true;clearResult();$('progress').classList.add('show');$('bar').style.width='2%';let input,out;try{const ff=await loadEngine();input='clearcut_input_'+clean(selected.name);out='clearcut_output.mp4';status('Preparing video…');await ff.writeFile(input,new Uint8Array(await selected.arrayBuffer()));status('Encoding at conservative high quality (this may take a while)…');let bytes=await encode(ff,input,out,18);let note='Encoded using conservative H.264 quality settings (CRF 18). Visual results vary by source; please compare the video.';if(hasTarget&&bytes.byteLength>target*1048576){status('Testing one modestly stronger setting. Quality remains the priority…');bytes=await encode(ff,input,out,20);if(bytes.byteLength>target*1048576)note='The target would require more aggressive compression. We did not force it: this result prioritizes visual quality and may remain larger than your target.';else note='The target was reached using a modestly stronger setting (CRF 20). Inspect fine details before relying on the result.'}const blob=new Blob([bytes],{type:'video/mp4'});downloadUrl=URL.createObjectURL(blob);$('before').textContent=fmt(selected.size);$('after').textContent=fmt(blob.size);const delta=selected.size-blob.size;$('saved').textContent=delta>=0?((delta/selected.size)*100).toFixed(1)+'% smaller':(Math.abs(delta)/selected.size*100).toFixed(1)+'% larger';$('notice').textContent=note+(delta<=0?' The original may already be efficiently encoded, so re-encoding did not reduce its size.':'');$('notice').className='alert '+(delta>0?'good':'');$('download').href=downloadUrl;$('download').download=clean(selected.name)+'_compressed.mp4';$('results').classList.add('show');$('bar').style.width='100%';status('Finished. Compare the result before deleting your original.');try{await ffmpeg.deleteFile(input);await ffmpeg.deleteFile(out)}catch{}}catch(e){console.error(e);status(e.message||'Something went wrong. Try another video or browser.')}finally{busy=false;$('start').disabled=!selected}};
